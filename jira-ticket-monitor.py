@@ -26,6 +26,9 @@ HIGHLIGHT_DAYS = int(config['SETTINGS']['HIGHLIGHT_DAYS'])
 # Number of recent comments to include in the Excel report
 RECENT_COMMENTS_COUNT = int(config['SETTINGS']['RECENT_COMMENTS_COUNT'])
 
+# File name prefix for the Excel report
+FILE_NAME_PREFIX = config['SETTINGS']['FILE_NAME_PREFIX']
+
 def fetch_issues():
     """Fetch all issues from Jira based on the JQL query."""
     start_at = 0
@@ -217,7 +220,7 @@ def format_excel(ws):
 def save_excel(wb):
     """Save the Excel workbook to a file."""
     current_time = datetime.now().strftime("%m-%d_%H.%M")
-    file_name = f"jira_issues_{current_time}.xlsx"
+    file_name = f"{FILE_NAME_PREFIX}_jira_issues_{current_time}.xlsx"
     file_path = rf"C:\Users\Wes\Documents\PlatformIO\Projects\jira-ticket-monitor\{file_name}"
     wb.save(file_path)
     print(f"Jira issues have been written to {file_name}")
