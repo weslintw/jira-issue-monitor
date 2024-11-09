@@ -1,11 +1,10 @@
 import requests
 from requests.auth import HTTPBasicAuth
-import openpyxl
-from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
-from openpyxl.utils import get_column_letter  # Add this import
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import configparser
+import win32com.client as win32
+
 
 # Load configuration from ini file
 config = configparser.ConfigParser()
@@ -28,6 +27,8 @@ RECENT_COMMENTS_COUNT = int(config['SETTINGS']['RECENT_COMMENTS_COUNT'])
 
 # File name prefix for the Excel report
 FILE_NAME_PREFIX = config['SETTINGS']['FILE_NAME_PREFIX']
+# 获取保存目录
+save_directory = config.get('Paths', 'save_directory')
 
 def fetch_issues():
     """Fetch all issues from Jira based on the JQL query."""
@@ -95,25 +96,25 @@ def extract_labels(issue, prefix):
 
 def create_excel(issues):
     """Create an Excel file with the fetched Jira issues and their details."""
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Jira Issues"
+    # excel = win32.gencache.EnsureDispatch('Excel.Application')
+    excel = win32.Dispatch('Excel.Application')
+    wb = excel.Workbooks.Add()
+    ws = wb.Worksheets(1)
+    ws.Name = "Jira Issues"
     
     # Insert the JQL query from config.ini into the first row
-    ws.append([f"JQL Query: {JQL_QUERY}"])
+    ws.Cells(1, 1).Value = f"JQL Query: {JQL_QUERY}"
+    ws.Cells(1, 1).Interior.Color = 65535
     
     # Merge the cells for the JQL query row
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=9)  # Adjusted end_column to 9
+    ws.Range(ws.Cells(1, 1), ws.Cells(1, 9)).Merge()
     
     # Add the header row for the issues
-    ws.append(["Jira Ticket ID", "Summary", "PIC", "Status", "Priority", "Update Time", "Sensor Issue Category", "Gerrit ID", "Comments"])
-    wrap_alignment = Alignment(wrap_text=True)
-
-    # Apply the same formatting to the first row as the second row
-    for cell in ws[1]:
-        cell.fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-        cell.font = Font(bold=True, color=cell.font.color)
-        cell.alignment = wrap_alignment
+    headers = ["Jira Ticket ID", "Summary", "PIC", "Status", "Priority", "Update Time", "Sensor Issue Category", "Gerrit ID", "Comments"]
+    for col_num, header in enumerate(headers, 1):
+        ws.Cells(2, col_num).Value = header
+        ws.Cells(2, col_num).Interior.Color = 65535
+        ws.Cells(2, col_num).Font.Bold = True
 
     with ThreadPoolExecutor(max_workers=20) as executor:
         future_to_issue = {executor.submit(fetch_comments, issue['key']): issue for issue in issues}
@@ -135,38 +136,42 @@ def create_excel(issues):
             update_time = datetime.strptime(updated, '%Y-%m-%dT%H:%M:%S.%f%z')
             local_update_time = update_time.astimezone().strftime('%Y-%m-%d %H:%M:%S')
 
-            # Debug message
-            # print(f"Processing issue {index}/{len(issues)}: {issue_key}")
-
             # 第一行
-            start_row = ws.max_row + 1
-            ws.append([issue_key, summary, assignee, status, priority, local_update_time, sensor_issue_category, gerrit_id, comments[0] if comments else ""])
+            start_row = ws.UsedRange.Rows.Count + 1
+            ws.Cells(start_row, 1).Value = issue_key
+            ws.Cells(start_row, 2).Value = summary
+            ws.Cells(start_row, 3).Value = assignee
+            ws.Cells(start_row, 4).Value = status
+            ws.Cells(start_row, 5).Value = priority
+            ws.Cells(start_row, 6).Value = local_update_time
+            ws.Cells(start_row, 7).Value = sensor_issue_category
+            ws.Cells(start_row, 8).Value = gerrit_id
 
-            # 設置超連結
-            cell = ws.cell(row=start_row, column=1)
-            cell.value = issue_key
-            cell.hyperlink = f"https://metainfra.atlassian.net/browse/{issue_key}"
-            cell.style = "Hyperlink"
+            # Combine all comments into one cell
+            combined_comments = "\n\n".join(comments)
+            ws.Cells(start_row, 9).Value = combined_comments
 
-            # 添加其餘評論
-            for comment in comments[1:]:
-                ws.append([issue_key, summary, assignee, status, priority, local_update_time, sensor_issue_category, gerrit_id, comment])
-
-            # 合併相同 issue 的儲存格
-            end_row = ws.max_row
-            # for col in range(1, 9):  # 合併 A 到 H 欄
-            #     if start_row != end_row:  # 只在有多行時才合併
-            #         ws.merge_cells(start_row=start_row, start_column=col, end_row=end_row, end_column=col)
-
-            # 設置評論的顏色
-            for row in range(start_row, end_row + 1):
-                comment_cell = ws.cell(row=row, column=9)
-                if comment_cell.value and '(' in comment_cell.value and ')' in comment_cell.value:
-                    comment_time_str = comment_cell.value.split('(')[1].split(')')[0]
+            # Set hyperlink
+            ws.Hyperlinks.Add(Anchor=ws.Cells(start_row, 1), Address=f"https://metainfra.atlassian.net/browse/{issue_key}", TextToDisplay=issue_key)
+            # Bold the author and timestamp in comments
+            for comment in comments:
+                if '**' in comment:
+                    start = combined_comments.find(comment)
+                    end = start + len(comment)
+                    bold_start = comment.find('**') + 2
+                    bold_end = comment.find('**', bold_start)
+                    if bold_end != -1:
+                        ws.Cells(start_row, 9).GetCharacters(Start=start + bold_start + 1, Length=bold_end - bold_start).Font.Bold = True
+            # Highlight recent comments
+            for comment in comments:
+                if '(' in comment and ')' in comment:
+                    comment_time_str = comment.split('(')[1].split(')')[0]
                     try:
                         comment_time = datetime.strptime(comment_time_str, '%Y-%m-%d %H:%M:%S')
                         if (datetime.now(comment_time.tzinfo) - comment_time).days <= HIGHLIGHT_DAYS:
-                            comment_cell.font = Font(color="0000FF")
+                            start = combined_comments.find(comment)
+                            end = start + len(comment)
+                            ws.Cells(start_row, 9).GetCharacters(Start=start + 1, Length=len(comment)).Font.Color = 16711680
                     except (ValueError, IndexError):
                         pass
 
@@ -174,55 +179,43 @@ def create_excel(issues):
             print(f"Processed {index}/{len(issues)} issues ({progress:.2f}%)")
 
     format_excel(ws)
-    save_excel(wb)
+    save_excel(wb, excel)
 
 def format_excel(ws):
     """Format the Excel sheet with appropriate styles and widths."""
     
     # 設置單元格對齊方式為自動換行和頂部對齊
-    wrap_alignment = Alignment(wrap_text=True, vertical='top')
-    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
-        for cell in row:
-            cell.alignment = wrap_alignment
-            cell.font = Font(name='Calibri', color=cell.font.color, bold=cell.font.bold, italic=cell.font.italic, underline=cell.font.underline)
-
-    # 設置第一行和第二行的背景顏色和字體加粗
-    for row in ws.iter_rows(min_row=1, max_row=2, min_col=1, max_col=ws.max_column):  # 遍歷第一行和第二行
-        for cell in row:
-            cell.fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-            cell.font = Font(bold=True, color=cell.font.color)
+    ws.Cells.WrapText = True
+    ws.Cells.VerticalAlignment = win32.constants.xlTop
 
     # 調整每一欄的寬度
-    for col in ws.columns:
-        max_length = max(len(str(cell.value)) for cell in col if cell.value)
-        adjusted_width = (max_length + 2)
-        col_letter = get_column_letter(col[0].column)  # 使用 get_column_letter
-        ws.column_dimensions[col_letter].width = adjusted_width
+    for col in range(1, 10):
+        ws.Columns(col).AutoFit()
 
     # 設置特定欄的寬度
-    ws.column_dimensions['A'].width = 14.86
-    ws.column_dimensions['B'].width = 50
-    ws.column_dimensions['G'].width = 30  # Adjusted width for new columns
-    ws.column_dimensions['H'].width = 30
-    ws.column_dimensions['I'].width = 100
+    ws.Columns(1).ColumnWidth = 14.86
+    ws.Columns(2).ColumnWidth = 50
+    ws.Columns(7).ColumnWidth = 30
+    ws.Columns(8).ColumnWidth = 30
+    ws.Columns(9).ColumnWidth = 100
 
     # 設置單元格邊框
-    thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
-        for cell in row:
-            cell.border = thin_border
+    for row in range(1, ws.UsedRange.Rows.Count + 1):
+        for col in range(1, 10):
+            cell = ws.Cells(row, col)
+            cell.Borders.LineStyle = win32.constants.xlContinuous
+            cell.Borders.Weight = win32.constants.xlThin
+            # 設置所有單元格的字體為 Calibri
+            ws.Cells.Font.Name = 'Calibri'
 
-    # 對第一列（A列）應用超連結樣式，除了標題行
-    for row in ws.iter_rows(min_row=3, max_row=ws.max_row, min_col=1, max_col=1):
-        for cell in row:
-            cell.font = Font(color="0000FF", underline="single", name=cell.font.name, bold=cell.font.bold, italic=cell.font.italic)
-
-def save_excel(wb):
+def save_excel(wb, excel):
     """Save the Excel workbook to a file."""
     current_time = datetime.now().strftime("%m-%d_%H.%M")
     file_name = f"{FILE_NAME_PREFIX}_jira_issues_{current_time}.xlsx"
-    file_path = rf"C:\Users\Wes\Documents\PlatformIO\Projects\jira-ticket-monitor\{file_name}"
-    wb.save(file_path)
+    file_path = rf"{save_directory}\{file_name}"
+    wb.SaveAs(file_path)
+    wb.Close()
+    excel.Quit()
     print(f"Jira issues have been written to {file_name}")
 
 def main():
