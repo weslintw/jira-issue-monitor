@@ -4,6 +4,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import configparser
 import win32com.client as win32
+import time
 
 
 # Load configuration from ini file
@@ -14,10 +15,6 @@ config.read('config.ini')
 JIRA_URL = config['JIRA']['URL']
 AUTH = HTTPBasicAuth(config['JIRA']['USERNAME'], config['JIRA']['API_TOKEN'])
 HEADERS = {"Accept": "application/json"}
-
-# Jira Query Language (JQL) query to fetch issues
-JQL_QUERY = config['QUERY']['JQL_QUERY']
-
 
 MAX_RESULTS = int(config['SETTINGS']['MAX_RESULTS'])
 # Number of days to highlight recent comments
@@ -31,8 +28,16 @@ FILE_NAME_PREFIX = config['SETTINGS']['FILE_NAME_PREFIX']
 # 获取保存目录
 save_directory = config.get('Paths', 'save_directory')
 
+# Cache for storing comments of issues
+comments_cache = {}
+
+# Debug switch for timing
+DEBUG_TIMING = False
+
 def fetch_issues(jql_query):
     """Fetch all issues from Jira based on the JQL query."""
+    if DEBUG_TIMING:
+        start_time = time.time()
     start_at = 0
     all_issues = []
     while True:
@@ -44,10 +49,18 @@ def fetch_issues(jql_query):
             break
         all_issues.extend(issues)
         start_at += MAX_RESULTS
+    if DEBUG_TIMING:
+        end_time = time.time()
+        print(f"fetch_issues took {end_time - start_time:.2f} seconds")
     return all_issues
 
 def fetch_comments(issue_key):
     """Fetch the last few comments for a given Jira issue."""
+    if DEBUG_TIMING:
+        start_time = time.time()
+    if issue_key in comments_cache:
+        return comments_cache[issue_key]
+
     comments_url = f"https://metainfra.atlassian.net/rest/api/3/issue/{issue_key}"
     response = requests.get(comments_url, headers=HEADERS, auth=AUTH)
     response.raise_for_status()
@@ -83,11 +96,15 @@ def fetch_comments(issue_key):
             # Convert update time to local timezone
             update_time = datetime.strptime(update_time, '%Y-%m-%dT%H:%M:%S.%f%z')
             local_update_time = update_time.astimezone().strftime('%Y-%m-%d %H:%M:%S')
-            full_comment = f"**{author} ({local_update_time}):**\n{comment_body}"
+            full_comment = f"**[{local_update_time}, {author}]**\n{comment_body}"
             comments_list.append(full_comment)
         except (KeyError, IndexError) as e:
             comments_list.append(f"Error parsing comment: {str(e)}")
 
+    comments_cache[issue_key] = comments_list  # Cache the comments
+    if DEBUG_TIMING:
+        end_time = time.time()
+        print(f"fetch_comments for {issue_key} took {end_time - start_time:.2f} seconds")
     return comments_list  # Return the list of comments, not a combined string
 
 def extract_labels(issue, prefix):
@@ -97,18 +114,21 @@ def extract_labels(issue, prefix):
 
 def create_excel(queries):
     """Create an Excel file with the fetched Jira issues and their details."""
+    if DEBUG_TIMING:
+        start_time = time.time()
+    # excel = win32.gencache.EnsureDispatch('Excel.Application')
     excel = win32.Dispatch('Excel.Application')
     wb = excel.Workbooks.Add()
     
     for sheet_name, jql_query in queries.items():
+        if DEBUG_TIMING:
+            sheet_start_time = time.time()
         ws = wb.Worksheets.Add()
         ws.Name = sheet_name
         
         # Insert the JQL query from config.ini into the first row
         ws.Cells(1, 1).Value = f"JQL Query: {jql_query}"
         ws.Cells(1, 1).Interior.Color = 65535
-        
-        # Merge the cells for the JQL query row
         ws.Range(ws.Cells(1, 1), ws.Cells(1, 9)).Merge()
         
         # Add the header row for the issues
@@ -118,9 +138,19 @@ def create_excel(queries):
             ws.Cells(2, col_num).Interior.Color = 65535
             ws.Cells(2, col_num).Font.Bold = True
 
+        if DEBUG_TIMING:
+            fetch_issues_start_time = time.time()
         issues = fetch_issues(jql_query)
+        if DEBUG_TIMING:
+            fetch_issues_end_time = time.time()
+            print(f"fetch_issues for {sheet_name} took {fetch_issues_end_time - fetch_issues_start_time:.2f} seconds")
+
+        if DEBUG_TIMING:
+            fetch_comments_start_time = time.time()
+        rows = []
         with ThreadPoolExecutor(max_workers=20) as executor:
             future_to_issue = {executor.submit(fetch_comments, issue['key']): issue for issue in issues}
+            print(f"Processing JQL Query: {sheet_name}")
             for index, future in enumerate(as_completed(future_to_issue), start=1):
                 issue = future_to_issue[future]
                 issue_key = issue['key']
@@ -139,51 +169,56 @@ def create_excel(queries):
                 update_time = datetime.strptime(updated, '%Y-%m-%dT%H:%M:%S.%f%z')
                 local_update_time = update_time.astimezone().strftime('%Y-%m-%d %H:%M:%S')
 
-                # 第一行
-                start_row = ws.UsedRange.Rows.Count + 1
-                ws.Cells(start_row, 1).Value = issue_key
-                ws.Cells(start_row, 2).Value = summary
-                ws.Cells(start_row, 3).Value = assignee
-                ws.Cells(start_row, 4).Value = status
-                ws.Cells(start_row, 5).Value = priority
-                ws.Cells(start_row, 6).Value = local_update_time
-                ws.Cells(start_row, 7).Value = sensor_issue_category
-                ws.Cells(start_row, 8).Value = gerrit_id
-
                 # Combine all comments into one cell
                 combined_comments = "\n\n".join(comments)
-                ws.Cells(start_row, 9).Value = combined_comments
-
-                # Set hyperlink
-                ws.Hyperlinks.Add(Anchor=ws.Cells(start_row, 1), Address=f"https://metainfra.atlassian.net/browse/{issue_key}", TextToDisplay=issue_key)
-                # Bold the author and timestamp in comments
-                for comment in comments:
-                    if '**' in comment:
-                        start = combined_comments.find(comment)
-                        end = start + len(comment)
-                        bold_start = comment.find('**') + 2
-                        bold_end = comment.find('**', bold_start)
-                        if bold_end != -1:
-                            ws.Cells(start_row, 9).GetCharacters(Start=start + bold_start + 1, Length=bold_end - bold_start).Font.Bold = True
-                # Highlight recent comments
-                for comment in comments:
-                    if '(' in comment and ')' in comment:
-                        comment_time_str = comment.split('(')[1].split(')')[0]
-                        try:
-                            comment_time = datetime.strptime(comment_time_str, '%Y-%m-%d %H:%M:%S')
-                            if (datetime.now(comment_time.tzinfo) - comment_time).days <= HIGHLIGHT_DAYS:
-                                start = combined_comments.find(comment)
-                                end = start + len(comment)
-                                ws.Cells(start_row, 9).GetCharacters(Start=start + 1, Length=len(comment)).Font.Color = 16711680
-                        except (ValueError, IndexError):
-                            pass
+                rows.append([issue_key, summary, assignee, status, priority, local_update_time, sensor_issue_category, gerrit_id, combined_comments])
 
                 progress = (index / len(issues)) * 100
                 print(f"Processed {index}/{len(issues)} issues ({progress:.2f}%)")
 
+        if DEBUG_TIMING:
+            fetch_comments_end_time = time.time()
+            print(f"fetch_comments for {sheet_name} took {fetch_comments_end_time - fetch_comments_start_time:.2f} seconds")
+
+        # Write all rows to the worksheet at once
+        ws.Range(ws.Cells(3, 1), ws.Cells(len(rows) + 2, len(headers))).Value = rows
+
+        # Set hyperlinks and format comments
+        for row_num, row in enumerate(rows, start=3):
+            ws.Hyperlinks.Add(Anchor=ws.Cells(row_num, 1), Address=f"https://metainfra.atlassian.net/browse/{row[0]}", TextToDisplay=row[0])
+            for comment in row[8].split("\n\n"):
+                if '**' in comment:
+                    start = row[8].find(comment)
+                    bold_start = comment.find('**') + 2
+                    bold_end = comment.find('**', bold_start)
+                    if bold_end != -1:
+                        ws.Cells(row_num, 9).GetCharacters(Start=start + bold_start + 1, Length=bold_end - bold_start).Font.Bold = True
+                if "**[" in comment and "]**" in comment:
+                    comment_time_str = comment.split("**[")[1].split(", ")[0]
+                    try:
+                        comment_time = datetime.strptime(comment_time_str, '%Y-%m-%d %H:%M:%S')
+                        if (datetime.now(comment_time.tzinfo) - comment_time).days <= HIGHLIGHT_DAYS:
+                            start = row[8].find(comment)
+                            ws.Cells(row_num, 9).GetCharacters(Start=start + 1, Length=len(comment)).Font.Color = 16711680
+                            if DEBUG_TIMING:
+                                print(f"Highlighted comment: {comment}")
+                        else:
+                            if DEBUG_TIMING:
+                                print(f"Comment not highlighted (older than {HIGHLIGHT_DAYS} days): {comment}")
+                    except (ValueError, IndexError) as e:
+                        if DEBUG_TIMING:
+                            print(f"Error parsing comment time: {e}")
+                            print(f"Comment: {comment}")
+
         format_excel(ws)
+        if DEBUG_TIMING:
+            sheet_end_time = time.time()
+            print(f"Processing sheet {sheet_name} took {sheet_end_time - sheet_start_time:.2f} seconds")
     
     save_excel(wb, excel)
+    if DEBUG_TIMING:
+        end_time = time.time()
+        print(f"create_excel took {end_time - start_time:.2f} seconds")
 
 def format_excel(ws):
     """Format the Excel sheet with appropriate styles and widths."""
@@ -193,24 +228,19 @@ def format_excel(ws):
     ws.Cells.VerticalAlignment = win32.constants.xlTop
 
     # 調整每一欄的寬度
-    for col in range(1, 10):
-        ws.Columns(col).AutoFit()
+    ws.Columns.AutoFit()
 
     # 設置特定欄的寬度
-    # ws.Columns(1).ColumnWidth = 14.86
+    ws.Columns(1).ColumnWidth = 12
     ws.Columns(2).ColumnWidth = 50
-    # ws.Columns(7).ColumnWidth = 30
-    # ws.Columns(8).ColumnWidth = 30
+    ws.Columns(4).ColumnWidth = 15
     ws.Columns(9).ColumnWidth = 100
 
-    # 設置單元格邊框
-    for row in range(1, ws.UsedRange.Rows.Count + 1):
-        for col in range(1, 10):
-            cell = ws.Cells(row, col)
-            cell.Borders.LineStyle = win32.constants.xlContinuous
-            cell.Borders.Weight = win32.constants.xlThin
-            # 設置所有單元格的字體為 Calibri
-            ws.Cells.Font.Name = 'Calibri'
+    # 設置單元格邊框和字體
+    used_range = ws.UsedRange
+    used_range.Borders.LineStyle = win32.constants.xlContinuous
+    used_range.Borders.Weight = win32.constants.xlThin
+    used_range.Font.Name = 'Calibri'
 
 def save_excel(wb, excel):
     """Save the Excel workbook to a file."""
