@@ -16,9 +16,10 @@ AUTH = HTTPBasicAuth(config['JIRA']['USERNAME'], config['JIRA']['API_TOKEN'])
 HEADERS = {"Accept": "application/json"}
 
 # Jira Query Language (JQL) query to fetch issues
-JQL_QUERY = config['JIRA']['JQL_QUERY']
-MAX_RESULTS = int(config['JIRA']['MAX_RESULTS'])
+JQL_QUERY = config['QUERY']['JQL_QUERY']
 
+
+MAX_RESULTS = int(config['SETTINGS']['MAX_RESULTS'])
 # Number of days to highlight recent comments
 HIGHLIGHT_DAYS = int(config['SETTINGS']['HIGHLIGHT_DAYS'])
 
@@ -30,12 +31,12 @@ FILE_NAME_PREFIX = config['SETTINGS']['FILE_NAME_PREFIX']
 # 获取保存目录
 save_directory = config.get('Paths', 'save_directory')
 
-def fetch_issues():
+def fetch_issues(jql_query):
     """Fetch all issues from Jira based on the JQL query."""
     start_at = 0
     all_issues = []
     while True:
-        params = {'jql': JQL_QUERY, 'maxResults': MAX_RESULTS, 'startAt': start_at}
+        params = {'jql': jql_query, 'maxResults': MAX_RESULTS, 'startAt': start_at}
         response = requests.get(JIRA_URL, headers=HEADERS, auth=AUTH, params=params)
         response.raise_for_status()
         issues = response.json().get('issues', [])
@@ -94,91 +95,94 @@ def extract_labels(issue, prefix):
     labels = [label[len(prefix):] for label in issue['fields']['labels'] if label.startswith(prefix)]
     return ','.join(labels)
 
-def create_excel(issues):
+def create_excel(queries):
     """Create an Excel file with the fetched Jira issues and their details."""
-    # excel = win32.gencache.EnsureDispatch('Excel.Application')
     excel = win32.Dispatch('Excel.Application')
     wb = excel.Workbooks.Add()
-    ws = wb.Worksheets(1)
-    ws.Name = "Jira Issues"
     
-    # Insert the JQL query from config.ini into the first row
-    ws.Cells(1, 1).Value = f"JQL Query: {JQL_QUERY}"
-    ws.Cells(1, 1).Interior.Color = 65535
+    for sheet_name, jql_query in queries.items():
+        ws = wb.Worksheets.Add()
+        ws.Name = sheet_name
+        
+        # Insert the JQL query from config.ini into the first row
+        ws.Cells(1, 1).Value = f"JQL Query: {jql_query}"
+        ws.Cells(1, 1).Interior.Color = 65535
+        
+        # Merge the cells for the JQL query row
+        ws.Range(ws.Cells(1, 1), ws.Cells(1, 9)).Merge()
+        
+        # Add the header row for the issues
+        headers = ["Jira Ticket ID", "Summary", "PIC", "Status", "Priority", "Update Time", "Sensor Issue Category", "Gerrit ID", "Comments"]
+        for col_num, header in enumerate(headers, 1):
+            ws.Cells(2, col_num).Value = header
+            ws.Cells(2, col_num).Interior.Color = 65535
+            ws.Cells(2, col_num).Font.Bold = True
+
+        issues = fetch_issues(jql_query)
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            future_to_issue = {executor.submit(fetch_comments, issue['key']): issue for issue in issues}
+            for index, future in enumerate(as_completed(future_to_issue), start=1):
+                issue = future_to_issue[future]
+                issue_key = issue['key']
+                summary = issue['fields']['summary']
+                assignee = issue['fields']['assignee']['displayName'] if issue['fields']['assignee'] else 'Unassigned'
+                status = issue['fields']['status']['name']
+                priority = issue['fields']['priority']['name'] if issue['fields']['priority'] else 'None'
+                updated = issue['fields']['updated']
+                comments = future.result()  # 這裡獲取的是評論列表
+
+                # Extract labels
+                sensor_issue_category = extract_labels(issue, 'issue-category:')
+                gerrit_id = extract_labels(issue, 'gerrit:')
+
+                # Convert update time to local timezone
+                update_time = datetime.strptime(updated, '%Y-%m-%dT%H:%M:%S.%f%z')
+                local_update_time = update_time.astimezone().strftime('%Y-%m-%d %H:%M:%S')
+
+                # 第一行
+                start_row = ws.UsedRange.Rows.Count + 1
+                ws.Cells(start_row, 1).Value = issue_key
+                ws.Cells(start_row, 2).Value = summary
+                ws.Cells(start_row, 3).Value = assignee
+                ws.Cells(start_row, 4).Value = status
+                ws.Cells(start_row, 5).Value = priority
+                ws.Cells(start_row, 6).Value = local_update_time
+                ws.Cells(start_row, 7).Value = sensor_issue_category
+                ws.Cells(start_row, 8).Value = gerrit_id
+
+                # Combine all comments into one cell
+                combined_comments = "\n\n".join(comments)
+                ws.Cells(start_row, 9).Value = combined_comments
+
+                # Set hyperlink
+                ws.Hyperlinks.Add(Anchor=ws.Cells(start_row, 1), Address=f"https://metainfra.atlassian.net/browse/{issue_key}", TextToDisplay=issue_key)
+                # Bold the author and timestamp in comments
+                for comment in comments:
+                    if '**' in comment:
+                        start = combined_comments.find(comment)
+                        end = start + len(comment)
+                        bold_start = comment.find('**') + 2
+                        bold_end = comment.find('**', bold_start)
+                        if bold_end != -1:
+                            ws.Cells(start_row, 9).GetCharacters(Start=start + bold_start + 1, Length=bold_end - bold_start).Font.Bold = True
+                # Highlight recent comments
+                for comment in comments:
+                    if '(' in comment and ')' in comment:
+                        comment_time_str = comment.split('(')[1].split(')')[0]
+                        try:
+                            comment_time = datetime.strptime(comment_time_str, '%Y-%m-%d %H:%M:%S')
+                            if (datetime.now(comment_time.tzinfo) - comment_time).days <= HIGHLIGHT_DAYS:
+                                start = combined_comments.find(comment)
+                                end = start + len(comment)
+                                ws.Cells(start_row, 9).GetCharacters(Start=start + 1, Length=len(comment)).Font.Color = 16711680
+                        except (ValueError, IndexError):
+                            pass
+
+                progress = (index / len(issues)) * 100
+                print(f"Processed {index}/{len(issues)} issues ({progress:.2f}%)")
+
+        format_excel(ws)
     
-    # Merge the cells for the JQL query row
-    ws.Range(ws.Cells(1, 1), ws.Cells(1, 9)).Merge()
-    
-    # Add the header row for the issues
-    headers = ["Jira Ticket ID", "Summary", "PIC", "Status", "Priority", "Update Time", "Sensor Issue Category", "Gerrit ID", "Comments"]
-    for col_num, header in enumerate(headers, 1):
-        ws.Cells(2, col_num).Value = header
-        ws.Cells(2, col_num).Interior.Color = 65535
-        ws.Cells(2, col_num).Font.Bold = True
-
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        future_to_issue = {executor.submit(fetch_comments, issue['key']): issue for issue in issues}
-        for index, future in enumerate(as_completed(future_to_issue), start=1):
-            issue = future_to_issue[future]
-            issue_key = issue['key']
-            summary = issue['fields']['summary']
-            assignee = issue['fields']['assignee']['displayName'] if issue['fields']['assignee'] else 'Unassigned'
-            status = issue['fields']['status']['name']
-            priority = issue['fields']['priority']['name'] if issue['fields']['priority'] else 'None'
-            updated = issue['fields']['updated']
-            comments = future.result()  # 這裡獲取的是評論列表
-
-            # Extract labels
-            sensor_issue_category = extract_labels(issue, 'issue-category:')
-            gerrit_id = extract_labels(issue, 'gerrit:')
-
-            # Convert update time to local timezone
-            update_time = datetime.strptime(updated, '%Y-%m-%dT%H:%M:%S.%f%z')
-            local_update_time = update_time.astimezone().strftime('%Y-%m-%d %H:%M:%S')
-
-            # 第一行
-            start_row = ws.UsedRange.Rows.Count + 1
-            ws.Cells(start_row, 1).Value = issue_key
-            ws.Cells(start_row, 2).Value = summary
-            ws.Cells(start_row, 3).Value = assignee
-            ws.Cells(start_row, 4).Value = status
-            ws.Cells(start_row, 5).Value = priority
-            ws.Cells(start_row, 6).Value = local_update_time
-            ws.Cells(start_row, 7).Value = sensor_issue_category
-            ws.Cells(start_row, 8).Value = gerrit_id
-
-            # Combine all comments into one cell
-            combined_comments = "\n\n".join(comments)
-            ws.Cells(start_row, 9).Value = combined_comments
-
-            # Set hyperlink
-            ws.Hyperlinks.Add(Anchor=ws.Cells(start_row, 1), Address=f"https://metainfra.atlassian.net/browse/{issue_key}", TextToDisplay=issue_key)
-            # Bold the author and timestamp in comments
-            for comment in comments:
-                if '**' in comment:
-                    start = combined_comments.find(comment)
-                    end = start + len(comment)
-                    bold_start = comment.find('**') + 2
-                    bold_end = comment.find('**', bold_start)
-                    if bold_end != -1:
-                        ws.Cells(start_row, 9).GetCharacters(Start=start + bold_start + 1, Length=bold_end - bold_start).Font.Bold = True
-            # Highlight recent comments
-            for comment in comments:
-                if '(' in comment and ')' in comment:
-                    comment_time_str = comment.split('(')[1].split(')')[0]
-                    try:
-                        comment_time = datetime.strptime(comment_time_str, '%Y-%m-%d %H:%M:%S')
-                        if (datetime.now(comment_time.tzinfo) - comment_time).days <= HIGHLIGHT_DAYS:
-                            start = combined_comments.find(comment)
-                            end = start + len(comment)
-                            ws.Cells(start_row, 9).GetCharacters(Start=start + 1, Length=len(comment)).Font.Color = 16711680
-                    except (ValueError, IndexError):
-                        pass
-
-            progress = (index / len(issues)) * 100
-            print(f"Processed {index}/{len(issues)} issues ({progress:.2f}%)")
-
-    format_excel(ws)
     save_excel(wb, excel)
 
 def format_excel(ws):
@@ -193,10 +197,10 @@ def format_excel(ws):
         ws.Columns(col).AutoFit()
 
     # 設置特定欄的寬度
-    ws.Columns(1).ColumnWidth = 14.86
+    # ws.Columns(1).ColumnWidth = 14.86
     ws.Columns(2).ColumnWidth = 50
-    ws.Columns(7).ColumnWidth = 30
-    ws.Columns(8).ColumnWidth = 30
+    # ws.Columns(7).ColumnWidth = 30
+    # ws.Columns(8).ColumnWidth = 30
     ws.Columns(9).ColumnWidth = 100
 
     # 設置單元格邊框
@@ -222,9 +226,8 @@ def main():
     """Main function to fetch Jira issues and create an Excel report."""
     print("Sending request to Jira...")
     try:
-        issues = fetch_issues()
-        print(f"Total issues to process: {len(issues)}")
-        create_excel(issues)
+        queries = {key: value for key, value in config['QUERY'].items()}
+        create_excel(queries)
     except requests.RequestException as e:
         print(f"Failed to fetch issues: {e}")
 
