@@ -116,8 +116,8 @@ def create_excel(queries):
     """Create an Excel file with the fetched Jira issues and their details."""
     if DEBUG_TIMING:
         start_time = time.time()
-    # excel = win32.gencache.EnsureDispatch('Excel.Application')
-    excel = win32.Dispatch('Excel.Application')
+    excel = win32.gencache.EnsureDispatch('Excel.Application')
+    #excel = win32.Dispatch('Excel.Application')
     wb = excel.Workbooks.Add()
     
     for sheet_name, jql_query in queries.items():
