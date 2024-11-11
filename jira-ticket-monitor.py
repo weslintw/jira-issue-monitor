@@ -89,14 +89,14 @@ def fetch_comments(issue_key):
     for comment in comments_data[-RECENT_COMMENTS_COUNT:][::-1]:
         try:
             author = comment['updateAuthor']['displayName']
-            update_time = comment['updated']
+            created_time = comment['created']
             comment_body = extract_text(comment['body']['content'])
 
             # Combine the full comment content
-            # Convert update time to local timezone
-            update_time = datetime.strptime(update_time, '%Y-%m-%dT%H:%M:%S.%f%z')
-            local_update_time = update_time.astimezone().strftime('%Y-%m-%d %H:%M:%S')
-            full_comment = f"**[{local_update_time}, {author}]**\n{comment_body}"
+            # Convert created time to local timezone
+            created_time = datetime.strptime(created_time, '%Y-%m-%dT%H:%M:%S.%f%z')
+            local_created_time = created_time.astimezone().strftime('%Y-%m-%d %H:%M:%S')
+            full_comment = f"**[{local_created_time}, {author}]**\n{comment_body}"
             comments_list.append(full_comment)
         except (KeyError, IndexError) as e:
             comments_list.append(f"Error parsing comment: {str(e)}")
@@ -126,17 +126,24 @@ def create_excel(queries):
         ws = wb.Worksheets.Add()
         ws.Name = sheet_name
         
-        # Insert the JQL query from config.ini into the first row
-        ws.Cells(1, 1).Value = f"JQL Query: {jql_query}"
+        # Insert the JQL query, HIGHLIGHT_DAYS, and RECENT_COMMENTS_COUNT into the first row with line breaks
+        ws.Cells(1, 1).Value = f"JQL Query: {jql_query}\nHighlight Days: {HIGHLIGHT_DAYS}\nRecent Comments Count: {RECENT_COMMENTS_COUNT}"
         ws.Cells(1, 1).Interior.Color = 65535
-        ws.Range(ws.Cells(1, 1), ws.Cells(1, 9)).Merge()
+        ws.Cells(1, 1).WrapText = True  # Enable text wrapping
+        ws.Range(ws.Cells(1, 1), ws.Cells(1, 10)).Merge()
+                
+        # Set the row height of the first row to 50
+        ws.Rows(1).RowHeight = 50
         
         # Add the header row for the issues
-        headers = ["Jira Ticket ID", "Summary", "PIC", "Status", "Priority", "Update Time", "Sensor Issue Category", "Gerrit ID", "Comments"]
+        headers = ["Jira Ticket ID", "Summary", "PIC", "Status", "Priority", "Update Time", "Sensor Issue Category", "Gerrit ID", "Comments", "Remark"]
         for col_num, header in enumerate(headers, 1):
             ws.Cells(2, col_num).Value = header
             ws.Cells(2, col_num).Interior.Color = 65535
             ws.Cells(2, col_num).Font.Bold = True
+
+        # Set the background color of the 10th column header to blue
+        ws.Cells(2, 10).Interior.Color = 15128778
 
         if DEBUG_TIMING:
             fetch_issues_start_time = time.time()
@@ -171,7 +178,7 @@ def create_excel(queries):
 
                 # Combine all comments into one cell
                 combined_comments = "\n\n".join(comments)
-                rows.append([issue_key, summary, assignee, status, priority, local_update_time, sensor_issue_category, gerrit_id, combined_comments])
+                rows.append([issue_key, summary, assignee, status, priority, local_update_time, sensor_issue_category, gerrit_id, combined_comments, ""])
 
                 progress = (index / len(issues)) * 100
                 print(f"Processed {index}/{len(issues)} issues ({progress:.2f}%)")
@@ -234,7 +241,10 @@ def format_excel(ws):
     ws.Columns(1).ColumnWidth = 12
     ws.Columns(2).ColumnWidth = 50
     ws.Columns(4).ColumnWidth = 15
+    ws.Columns(7).ColumnWidth = 20
+    ws.Columns(8).ColumnWidth = 8
     ws.Columns(9).ColumnWidth = 100
+    ws.Columns(10).ColumnWidth = 50
 
     # 設置單元格邊框和字體
     used_range = ws.UsedRange
