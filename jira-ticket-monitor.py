@@ -25,6 +25,8 @@ RECENT_COMMENTS_COUNT = int(config['SETTINGS']['RECENT_COMMENTS_COUNT'])
 
 # File name prefix for the Excel report
 FILE_NAME_PREFIX = config['SETTINGS']['FILE_NAME_PREFIX']
+# File name postfix for the Excel report
+FILE_NAME_POSTFIX = config['SETTINGS']['FILE_NAME_POSTFIX']
 # 获取保存目录
 save_directory = config.get('Paths', 'save_directory')
 
@@ -255,7 +257,7 @@ def format_excel(ws):
 def save_excel(wb, excel):
     """Save the Excel workbook to a file."""
     current_time = datetime.now().strftime("%m-%d_%H.%M")
-    file_name = f"{FILE_NAME_PREFIX}_jira_issues_{current_time}.xlsx"
+    file_name = f"{FILE_NAME_PREFIX}_jira_issues_{FILE_NAME_POSTFIX}.xlsx"
     file_path = rf"{save_directory}\{file_name}"
     wb.SaveAs(file_path)
     wb.Close()
