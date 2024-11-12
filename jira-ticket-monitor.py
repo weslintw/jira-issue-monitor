@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import configparser
 import win32com.client as win32
 import time
+import os
 
 
 # Load configuration from ini file
@@ -118,34 +119,34 @@ def create_excel(queries):
     """Create an Excel file with the fetched Jira issues and their details."""
     if DEBUG_TIMING:
         start_time = time.time()
-    excel = win32.gencache.EnsureDispatch('Excel.Application')
-    #excel = win32.Dispatch('Excel.Application')
-    wb = excel.Workbooks.Add()
+    #excel = win32.gencache.EnsureDispatch('Excel.Application')
+    excel = win32.Dispatch('Excel.Application')
+    
+    current_time = datetime.now().strftime("%m-%d_%H.%M")
+    file_name = f"{FILE_NAME_PREFIX}_jira_issues_{FILE_NAME_POSTFIX}.xlsx"
+    file_path = rf"{save_directory}\{file_name}"
+    
+    if os.path.exists(file_path):
+        wb = excel.Workbooks.Open(file_path)
+    else:
+        wb = excel.Workbooks.Add()
     
     for sheet_name, jql_query in queries.items():
         if DEBUG_TIMING:
             sheet_start_time = time.time()
-        ws = wb.Worksheets.Add()
-        ws.Name = sheet_name
         
-        # Insert the JQL query, HIGHLIGHT_DAYS, and RECENT_COMMENTS_COUNT into the first row with line breaks
-        ws.Cells(1, 1).Value = f"JQL Query: {jql_query}\nHighlight Days: {HIGHLIGHT_DAYS}\nRecent Comments Count: {RECENT_COMMENTS_COUNT}"
-        ws.Cells(1, 1).Interior.Color = 65535
-        ws.Cells(1, 1).WrapText = True  # Enable text wrapping
-        ws.Range(ws.Cells(1, 1), ws.Cells(1, 10)).Merge()
-                
-        # Set the row height of the first row to 50
-        ws.Rows(1).RowHeight = 50
-        
-        # Add the header row for the issues
-        headers = ["Jira Ticket ID", "Summary", "PIC", "Status", "Priority", "Update Time", "Sensor Issue Category", "Gerrit ID", "Comments", "Remark"]
-        for col_num, header in enumerate(headers, 1):
-            ws.Cells(2, col_num).Value = header
-            ws.Cells(2, col_num).Interior.Color = 65535
-            ws.Cells(2, col_num).Font.Bold = True
-
-        # Set the background color of the 10th column header to blue
-        ws.Cells(2, 10).Interior.Color = 15128778
+        # Check if the worksheet already exists
+        try:
+            ws = wb.Worksheets(sheet_name)
+        except win32.com_error:
+            ws = wb.Worksheets.Add()
+            ws.Name = sheet_name
+            # Add the header row for the issues
+            headers = ["Jira Ticket ID", "Summary", "PIC", "Status", "Priority", "Update Time", "Sensor Issue Category", "Gerrit ID", "Comments", "Remark"]
+            for col_num, header in enumerate(headers, 1):
+                ws.Cells(2, col_num).Value = header
+                ws.Cells(2, col_num).Interior.Color = 65535
+                ws.Cells(2, col_num).Font.Bold = True
 
         if DEBUG_TIMING:
             fetch_issues_start_time = time.time()
@@ -189,35 +190,52 @@ def create_excel(queries):
             fetch_comments_end_time = time.time()
             print(f"fetch_comments for {sheet_name} took {fetch_comments_end_time - fetch_comments_start_time:.2f} seconds")
 
-        # Write all rows to the worksheet at once
-        ws.Range(ws.Cells(3, 1), ws.Cells(len(rows) + 2, len(headers))).Value = rows
+        # Update existing rows or add new rows
+        last_row = 2  # Start after the header row
+        if ws.UsedRange is not None:
+            last_row = ws.UsedRange.Rows.Count
+        for row in rows:
+            issue_key = row[0]
+            found = False
+            for r in range(3, last_row + 1):
+                if ws.Cells(r, 1).Value == issue_key:
+                    for col in range(2, 10):
+                        ws.Cells(r, col).Value = str(row[col - 1])
+                    found = True
+                    break
+            if not found:
+                last_row += 1
+                for col in range(1, 10):
+                    ws.Cells(last_row, col).Value = row[col - 1]
 
         # Set hyperlinks and format comments
-        for row_num, row in enumerate(rows, start=3):
-            ws.Hyperlinks.Add(Anchor=ws.Cells(row_num, 1), Address=f"https://metainfra.atlassian.net/browse/{row[0]}", TextToDisplay=row[0])
-            for comment in row[8].split("\n\n"):
-                if '**' in comment:
-                    start = row[8].find(comment)
-                    bold_start = comment.find('**') + 2
-                    bold_end = comment.find('**', bold_start)
-                    if bold_end != -1:
-                        ws.Cells(row_num, 9).GetCharacters(Start=start + bold_start + 1, Length=bold_end - bold_start).Font.Bold = True
-                if "**[" in comment and "]**" in comment:
-                    comment_time_str = comment.split("**[")[1].split(", ")[0]
-                    try:
-                        comment_time = datetime.strptime(comment_time_str, '%Y-%m-%d %H:%M:%S')
-                        if (datetime.now(comment_time.tzinfo) - comment_time).days <= HIGHLIGHT_DAYS:
-                            start = row[8].find(comment)
-                            ws.Cells(row_num, 9).GetCharacters(Start=start + 1, Length=len(comment)).Font.Color = 16711680
+        for row_num in range(3, last_row + 1):
+            ws.Hyperlinks.Add(Anchor=ws.Cells(row_num, 1), Address=f"https://metainfra.atlassian.net/browse/{ws.Cells(row_num, 1).Value}", TextToDisplay=ws.Cells(row_num, 1).Value)
+            cell_value = ws.Cells(row_num, 9).Value
+            if cell_value:
+                for comment in cell_value.split("\n\n"):
+                    if '**' in comment:
+                        start = cell_value.find(comment)
+                        bold_start = comment.find('**') + 2
+                        bold_end = comment.find('**', bold_start)
+                        if bold_end != -1:
+                            ws.Cells(row_num, 9).GetCharacters(Start=start + bold_start + 1, Length=bold_end - bold_start).Font.Bold = True
+                    if "**[" in comment and "]**" in comment:
+                        comment_time_str = comment.split("**[")[1].split(", ")[0]
+                        try:
+                            comment_time = datetime.strptime(comment_time_str, '%Y-%m-%d %H:%M:%S')
+                            if (datetime.now(comment_time.tzinfo) - comment_time).days <= HIGHLIGHT_DAYS:
+                                start = cell_value.find(comment)
+                                ws.Cells(row_num, 9).GetCharacters(Start=start + 1, Length=len(comment)).Font.Color = 16711680
+                                if DEBUG_TIMING:
+                                    print(f"Highlighted comment: {comment}")
+                            else:
+                                if DEBUG_TIMING:
+                                    print(f"Comment not highlighted (older than {HIGHLIGHT_DAYS} days): {comment}")
+                        except (ValueError, IndexError) as e:
                             if DEBUG_TIMING:
-                                print(f"Highlighted comment: {comment}")
-                        else:
-                            if DEBUG_TIMING:
-                                print(f"Comment not highlighted (older than {HIGHLIGHT_DAYS} days): {comment}")
-                    except (ValueError, IndexError) as e:
-                        if DEBUG_TIMING:
-                            print(f"Error parsing comment time: {e}")
-                            print(f"Comment: {comment}")
+                                print(f"Error parsing comment time: {e}")
+                                print(f"Comment: {comment}")
 
         format_excel(ws)
         if DEBUG_TIMING:
@@ -259,8 +277,17 @@ def save_excel(wb, excel):
     current_time = datetime.now().strftime("%m-%d_%H.%M")
     file_name = f"{FILE_NAME_PREFIX}_jira_issues_{FILE_NAME_POSTFIX}.xlsx"
     file_path = rf"{save_directory}\{file_name}"
-    wb.SaveAs(file_path)
-    wb.Close()
+    
+    if os.path.exists(file_path):
+        existing_wb = excel.Workbooks.Open(file_path)
+        for sheet in wb.Worksheets:
+            sheet.Copy(Before=existing_wb.Sheets(1))
+        existing_wb.Save()
+        existing_wb.Close(SaveChanges=True)
+    else:
+        wb.SaveAs(file_path)
+    
+    wb.Close(SaveChanges=True)
     excel.Quit()
     print(f"Jira issues have been written to {file_name}")
 
